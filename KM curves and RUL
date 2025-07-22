@@ -1,0 +1,158 @@
+# Importing Data
+
+df = pd.read_csv("df.csv", index_col=0)
+df_cleaned_all = pd.read_csv("df_cleaned_all.csv", index_col=0)
+df_extended = pd.read_csv("df_extended.csv", index_col=0)
+df_extended_filled = pd.read_csv("df_extended_filled.csv", index_col=0)
+!pip install lifelines
+
+# Kaplan-meire Curves
+
+from lifelines import KaplanMeierFitter
+
+level_order = ['A', 'B', 'C', 'D', 'E']
+level_to_num = {l: i for i, l in enumerate(level_order)}
+
+df_extended_filled["level_num"] = df_extended_filled["level"].map(level_to_num)
+
+km_curves = {}
+
+for i, from_level in enumerate(level_order[:-1]):
+    from_level_num = level_to_num[from_level]
+    higher_levels = level_order[from_level_num + 1:]
+
+    km_curves[from_level] = {}
+
+    for to_level in higher_levels:
+        to_level_num = level_to_num[to_level]
+        durations = []
+        events = []
+
+        for sid, group in df_extended_filled.groupby("new_system_id"):
+            group = group.sort_values("age")
+            if from_level not in group["level"].values:
+                continue
+
+            start_age = group[group["level"] == from_level]["age"].iloc[0]
+            hit = group[group["level"] == to_level]
+            if not hit.empty:
+                duration = hit["age"].iloc[0] - start_age
+                if duration < 0:
+                    continue
+                event = 1
+            else:
+                duration = group["age"].max() - start_age
+                event = 0
+
+            durations.append(duration)
+            events.append(event)
+
+        if len(durations) > 0:
+            kmf = KaplanMeierFitter()
+            kmf.fit(durations, events, label=f"{from_level}→{to_level}")
+            km_curves[from_level][to_level] = kmf
+            kmf.plot_survival_function()
+
+    plt.title(f"Kaplan-Meier from {from_level} to higher levels")
+    plt.xlabel("Years since entering " + from_level)
+    plt.ylabel("Survival Probability (not yet reached next level)")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
+# Remaning Usful Life(RUL) estimation
+import pandas as pd
+
+def calculate_rul(survival_table, current_time):
+    if current_time < survival_table['Time'].min():
+        r_tk_minus_one = 1.0
+    else:
+        if current_time > 0:
+            last_valid_time = survival_table[survival_table['Time'] < current_time]['Time'].max()
+            r_tk_minus_one = survival_table[survival_table['Time'] == last_valid_time]['Cumulative Survival'].iloc[0]
+        else:
+            last_valid_time = survival_table[survival_table['Time'] <= current_time]['Time'].max()
+            r_tk_minus_one = survival_table[survival_table['Time'] == last_valid_time]['Cumulative Survival'].iloc[0]
+    #print(f'r_tk_minus_one: {r_tk_minus_one}')
+    numerator_sum = 0.0
+    survival_probs = survival_table.set_index('Time')['Cumulative Survival'].to_dict()
+
+    for t_l in survival_table['Time']:
+        if t_l >= current_time:
+            r_tl = survival_probs.get(t_l, 0)
+            if t_l == survival_table['Time'].min():
+                r_tl_minus_one = 1.0
+            else:
+                r_tl_minus_one = survival_table[survival_table["Time"] < t_l]["Cumulative Survival"].iloc[-1]
+            numerator_sum += t_l * (r_tl_minus_one - r_tl)
+
+            # print(f'tl: {t_l}, r_tl: {r_tl}')
+            # print(f'r_tl_minus_one: {r_tl_minus_one}')
+            # print(f'_________________ {numerator_sum}___________')
+    if r_tk_minus_one == 0:
+        return 0
+    else:
+        rul = (numerator_sum / r_tk_minus_one) - current_time
+        return rul
+
+def get_rul(current_level, km_curves, current_time):
+    rul_table = []
+
+    if current_level not in km_curves:
+        return pd.DataFrame(columns=["From", "To", "RUL"])
+
+    for target_level, kmf in km_curves[current_level].items():
+        survival_df = kmf.survival_function_.reset_index()
+        survival_df.columns = ["Time", "Cumulative Survival"]
+        rul = calculate_rul(survival_df, current_time)
+        rul_table.append({
+            "From": current_level,
+            "To": target_level,
+            "RUL": round(rul, 2)
+        })
+
+    return pd.DataFrame(rul_table)
+
+def rul_time_table_for_level(current_level, km_curves, time_points=[0, 10, 20, 30, 40, 50, 60, 70, 80]):
+    all_results = {}
+
+    for t in time_points:
+        df_rul = get_rul(current_level, km_curves, t)
+        for _, row in df_rul.iterrows():
+            key = f"{row['From']}→{row['To']}"
+            if key not in all_results:
+                all_results[key] = {}
+            all_results[key][t] = row['RUL']
+
+    records = []
+    for transition, time_ruls in all_results.items():
+        row = {"From→To": transition}
+        for t in time_points:
+            row[t] = time_ruls.get(t, None)
+        records.append(row)
+
+    return pd.DataFrame(records)
+
+
+def rul_time_table_for_all_levels(km_curves, time_points=[0, 10, 20, 30, 40, 50, 60, 70, 80]):
+    all_records = []
+
+    for current_level in km_curves:
+        rul_df = rul_time_table_for_level(current_level, km_curves, time_points)
+        all_records.append(rul_df)
+
+    return pd.concat(all_records, ignore_index=True)
+
+full_rul_table = rul_time_table_for_all_levels(km_curves)
+
+selected_transitions = ["A→B", "B→C", "C→D", "D→E"]
+rul_df = full_rul_table[full_rul_table["From→To"].isin(selected_transitions)].copy()
+
+
+# Table of RUL
+rul_df["Level"] = rul_df["From→To"].str.split("→").str[0]
+rul_df = rul_df.drop(columns=["From→To"]).set_index("Level")
+
+print(rul_df)
