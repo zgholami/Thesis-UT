@@ -1,0 +1,94 @@
+# Importing Data
+
+df = pd.read_csv("df.csv", index_col=0)
+df_cleaned_all = pd.read_csv("df_cleaned_all.csv", index_col=0)
+df_extended = pd.read_csv("df_extended.csv", index_col=0)
+df_extended_filled = pd.read_csv("df_extended_filled.csv", index_col=0)
+
+
+# Random Forest 
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from sklearn.preprocessing import LabelEncoder
+
+
+df_sorted = df_extended_filled.sort_values(["new_system_id", "age"])
+
+records = []
+
+for sid, group in df_sorted.groupby("new_system_id"):
+    group = group.reset_index(drop=True)
+    for i in range(len(group) - 1):
+        age_now = group.loc[i, "age"]
+        level_now = group.loc[i, "level"]
+        age_next = group.loc[i + 1, "age"]
+        level_next = group.loc[i + 1, "level"]
+
+        time_step = age_next - age_now
+        records.append({
+            "age_now": age_now,
+            "level_now": level_now,
+            "level_next": level_next,
+            "time_step": time_step
+        })
+
+df_model = pd.DataFrame(records)
+
+all_levels = pd.concat([df_model["level_now"], df_model["level_next"]])
+le = LabelEncoder()
+le.fit(all_levels)
+
+df_model["level_now_num"] = le.transform(df_model["level_now"])
+df_model["level_next_num"] = le.transform(df_model["level_next"])
+
+X = df_model[["age_now", "level_now_num", "time_step"]]
+y = df_model["level_next_num"]
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+rf = RandomForestClassifier(
+    n_estimators=500,
+    max_depth=9,
+    criterion='gini',
+    max_features=None,
+    random_state=40
+)
+
+rf.fit(X_train, y_train)
+
+y_pred = rf.predict(X_test)
+print(classification_report(y_test, y_pred, target_names=le.classes_))
+
+
+# Predictions
+
+import pandas as pd
+
+
+levels_now = ['A', 'B', 'C', 'D']
+ages_now = list(range(0, 80, 10))
+
+combinations = []
+
+for level in levels_now:
+    for age in ages_now:
+        combinations.append({
+            "level_now": level,
+            "age_now": age,
+            "time_step": 10
+        })
+
+predict_df = pd.DataFrame(combinations)
+
+
+predict_df["level_now_num"] = le.transform(predict_df["level_now"])
+
+X_pred = predict_df[["age_now", "level_now_num", "time_step"]]
+y_pred = rf.predict(X_pred)
+
+predict_df["predicted_next_level"] = le.inverse_transform(y_pred)
+predict_df = predict_df.drop(columns=["level_now_num"])
+
+print(predict_df)
